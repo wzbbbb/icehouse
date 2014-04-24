@@ -1,0 +1,211 @@
+heat_template_version: 2013-05-23
+description: AutoScaling Wordpress
+parameters:
+  image:
+    type: string
+    description: Image used for servers
+    default: 67c86057-d2d7-475a-975d-5f650113bad8
+  key:
+    type: string
+    description: SSH key to connect to the servers
+    default: mykey
+  flavor:
+    type: string
+    description: flavor used by the web servers
+    default: UVMS.node
+  database_flavor:
+    type: string
+    description: flavor used by the db server
+    default: DU.node
+  subnet_id:
+    type: string
+    description: subnet on which the load balancer will be located
+    default: f8145f8b-ce10-46ad-8fcb-cbc4c0a5f8a5
+  database_name:
+    type: string
+    description: Name of the wordpress DB
+    default: wordpress
+  database_user:
+    type: string
+    description: Name of the wordpress user
+    default: wordpress
+  #vip_address:
+  #  type: string
+  #  description: Address for vip
+  #  default: 192.168.114.71
+  session_persistence_type:
+    type: string
+    description: LB vip session persistence
+    default: HTTP_COOKIE
+resources:
+  database_password:
+    type: OS::Heat::RandomString
+  database_root_password:
+    type: OS::Heat::RandomString
+  db:
+    type: OS::Nova::Server
+    properties:
+      name: db_server
+      flavor: {get_param: database_flavor}
+      image: {get_param: image}
+      key_name: {get_param: key}
+      networks: [{"network": 4a1e36c7-b80b-4bb0-99b2-27da0535feb4}]
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash -v
+            rpm -Uvh http://download.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm
+            yum -y update
+            echo "Ors12a90"  | passwd root --stdin
+            sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+            yum -y install mysqldb mysql-server
+            service mysqld start
+            mysqladmin -u root password $db_rootpassword
+            cat << EOF | mysql -u root --password=$db_rootpassword
+            CREATE DATABASE $db_name;
+            GRANT ALL PRIVILEGES ON $db_name.* TO "$db_user"@"%"
+            IDENTIFIED BY "$db_password";
+            FLUSH PRIVILEGES;
+            EXIT
+            EOF
+            yum -y install perl python python-setuptools cloud-init python-pip
+            pip-python install argparse 'boto==2.5.2' heat-cfntools
+            cfn-create-aws-symlinks --source /usr/bin
+            service iptables stop
+          params:
+            $db_rootpassword: {get_attr: [database_root_password, value]}
+            $db_name: {get_param: database_name}
+            $db_user: {get_param: database_user}
+            $db_password: {get_attr: [database_password, value]}
+  web_server_group:
+    type: OS::Heat::AutoScalingGroup
+    properties:
+      min_size: 1
+      max_size: 3
+      resource:
+        #type: lb_server.yaml
+        type: http://192.168.115.41/download/lb_server.yaml
+        properties:
+          flavor: {get_param: flavor}
+          image: {get_param: image}
+          key_name: {get_param: key}
+          pool_id: {get_resource: pool}
+          metadata: {"metering.stack": {get_param: "OS::stack_id"}}
+          user_data:
+            str_replace:
+              template: |
+                #!/bin/bash -v
+                rpm -Uvh http://download.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm
+
+                yum -y update
+                yum -y install httpd wordpress
+                service httpd start
+                setsebool -P httpd_can_network_connect_db=1
+
+                sed -i "/Deny from All/d" /etc/httpd/conf.d/wordpress.conf
+                sed -i "s/Require local/Require all granted/" /etc/httpd/conf.d/wordpress.conf
+                sed -i s/database_name_here/$db_name/ /etc/wordpress/wp-config.php
+                sed -i s/username_here/$db_user/ /etc/wordpress/wp-config.php
+                sed -i s/password_here/$db_password/ /etc/wordpress/wp-config.php
+                sed -i s/localhost/$db_host/ /etc/wordpress/wp-config.php
+
+                service httpd restart
+                service iptables stop
+                echo "Ors12a90"  | passwd root --stdin
+                sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+                yum -y install perl python python-setuptools cloud-init python-pip
+                pip-python install argparse 'boto==2.5.2' heat-cfntools
+                cfn-create-aws-symlinks --source /usr/bin
+              params:
+                $db_name: {get_param: database_name}
+                $db_user: {get_param: database_user}
+                $db_password: {get_attr: [database_password, value]}
+                $db_host: {get_attr: [db, first_address]}
+  web_server_scaleup_policy:
+    type: OS::Heat::ScalingPolicy
+    properties:
+      adjustment_type: change_in_capacity
+      auto_scaling_group_id: {get_resource: web_server_group}
+      cooldown: 60
+      scaling_adjustment: 1
+  web_server_scaledown_policy:
+    type: OS::Heat::ScalingPolicy
+    properties:
+      adjustment_type: change_in_capacity
+      auto_scaling_group_id: {get_resource: web_server_group}
+      cooldown: 60
+      scaling_adjustment: -1
+  cpu_alarm_high:
+    type: OS::Ceilometer::Alarm
+    properties:
+      description: Scale-up if the average CPU > 20% for 1 minute
+      meter_name: cpu_util
+      statistic: avg
+      period: 60
+      evaluation_periods: 1
+      threshold: 20
+      alarm_actions:
+        - {get_attr: [web_server_scaleup_policy, alarm_url]}
+      #insufficient_data_actions:
+      #  - {get_attr: [web_server_scaleup_policy, alarm_url]}
+      matching_metadata: {'metadata.user_metadata.stack': {get_param: "OS::stack_id"}}
+      #matching_metadata: {'metadata.user_metadata.stack': {get_resource: web_server_group}}
+      comparison_operator: gt
+  cpu_alarm_low:
+    type: OS::Ceilometer::Alarm
+    properties:
+      description: Scale-down if the average CPU < 5% for 10 minutes
+      meter_name: cpu_util
+      statistic: avg
+      period: 600
+      evaluation_periods: 1
+      threshold: 5
+      alarm_actions:
+        - {get_attr: [web_server_scaledown_policy, alarm_url]}
+      #insufficient_data_actions:
+      #  - {get_attr: [web_server_scaleup_policy, alarm_url]}
+      matching_metadata: {'metadata.user_metadata.stack': {get_param: "OS::stack_id"}}
+      #matching_metadata: {'metadata.user_metadata.stack': {get_resource: web_server_group}}
+      comparison_operator: lt
+  monitor:
+    type: OS::Neutron::HealthMonitor
+    properties:
+      type: TCP
+      delay: 3
+      max_retries: 5
+      timeout: 5
+  pool:
+    type: OS::Neutron::Pool
+    properties:
+      protocol: HTTP
+      monitors: [{get_resource: monitor}]
+      subnet_id: {get_param: subnet_id}
+      lb_method: ROUND_ROBIN
+      vip:
+        protocol_port: 80
+        session_persistence:
+          type: {get_param: session_persistence_type}
+        #address: {get_param: vip_address}
+  lb:
+    type: OS::Neutron::LoadBalancer
+    properties:
+      protocol_port: 80
+      pool_id: {get_resource: pool}
+  #floatingip:
+  #  type: OS::Nova::FloatingIP
+  #  properties:
+  #    pool: external
+outputs:
+    #vip_floating_ip:
+    #  description: FloatingIP of VIP
+    #  value: {get_attr: [floatingip, floating_ip_address]}
+    #member2_ip_address:
+    #  description: IP address of member2
+    #  value: {get_attr: [member2, first_address]}
+    vip:
+      description: VIP info
+      value: {get_attr: [pool, vip]}
+    #lb_keypair_private_key:
+    #  description: private key of KeyPair for 'ssh-add use'
+    #  value: {get_attr: [lb_keypair, private_key]}
