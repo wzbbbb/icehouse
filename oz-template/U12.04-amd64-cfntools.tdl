@@ -1,0 +1,42 @@
+<template>
+  <name>U12-04-x86_64-cfntools</name>
+  <os>
+    <name>Ubuntu</name>
+    <version>12.04</version>
+    <arch>x86_64</arch>
+    <install type='iso'>
+      <iso>file:/root/oz/ubuntu-12.04.4-server-amd64.iso</iso>
+    </install>
+  </os>
+  <description>Ubuntu 12.04</description>
+  <commands>
+<!--    <command name='lockroot'> 
+passwd -l root
+    </command> -->
+   <command name='console'>
+sed -i 's/splash//g' /etc/default/grub
+sed -i 's/quiet/console=ttyS0/g' /etc/default/grub
+/usr/sbin/update-grub
+   </command>
+    <command name='commands'>
+apt-get -y update
+apt-get -y upgrade
+echo "cloud-init cloud-init/datasources string NoCloud, OVF, Ec2" > /tmp/debconf-selections
+/usr/bin/debconf-set-selections /tmp/debconf-selections
+rm -f /tmp/debconf-selections
+apt-get -y install python-argparse cloud-init python-psutil python-pip
+#apt-get -y remove python-boto
+#apt-get --reinstall install openssh-server openssh-client 
+#pip install 'boto==2.5.2' heat-cfntools
+#cfn-create-aws-symlinks --source /usr/local/bin
+apt-get clean
+echo root:1q2w3e|chpasswd
+ufw disable
+/usr/sbin/useradd -m stack
+echo "stack ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+sed -i 's/^user: ubuntu/user: stack/g' /etc/cloud/cloud.cfg
+echo -n > /etc/udev/rules.d/70-persistent-net.rules
+echo -n > /lib/udev/rules.d/75-persistent-net-generator.rules
+    </command>
+  </commands>
+</template>
